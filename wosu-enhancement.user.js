@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         WOSU — Advanced Live Enhancement Suite
+// @name         WOSU — Advanced Live Enhancement Suite + Custom Autoplay
 // @namespace    https://github.com/tussle1/eternity
-// @version      1.0.0
-// @description  Live beatmap tracking, audio synchronization, analysis, HUD editor and performance monitoring for wosu.dino.icu. Read-only integration: no gameplay input, no score manipulation.
+// @version      1.1.0
+// @description  Live beatmap tracking, audio synchronization, analysis, HUD editor, performance monitoring and an independent custom autoplay engine with configurable humanization/randomization for wosu.dino.icu. Does not use the site's built-in Auto mod.
 // @author       Arena
 // @match        https://wosu.dino.icu/*
 // @run-at       document-start
@@ -51,8 +51,11 @@
  * controlPoints,difficulty}.ts and src/screens/play/PlayerScreen.ts. They are
  * ports (not imports) because a userscript cannot reach ES-module internals.
  *
- * Everything is read-only. No automated input, no score writes, no network
- * calls of our own, no external dependencies.
+ * The live suite stays read-only. The optional Custom Autoplay engine is a
+ * separate, independent input layer: it never calls WOSU's AutoPlayer / Auto
+ * mod, never writes scores and makes no network calls. It synthesizes normal
+ * keyboard/pointer events from the decoded beatmap and the audio clock, with
+ * configurable humanization and randomization.
  */
 (function () {
     'use strict';
@@ -61,7 +64,7 @@
     // =======================================================================
     // 0. Small utilities
     // =======================================================================
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     const NS = 'wosu-enhance';
     const now = () => Date.now();
     const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -190,6 +193,7 @@
 
     const SECTIONS = [
         { id: 'dashboard', name: 'Dashboard', icon: '◈' },
+        { id: 'autoplay', name: 'Autoplay', icon: '▶' },
         { id: 'tracking', name: 'Live Tracking', icon: '◎' },
         { id: 'visuals', name: 'Visuals', icon: '✦' },
         { id: 'hud', name: 'HUD Editor', icon: '▣' },
@@ -207,6 +211,7 @@
     ];
 
     const MODULES = [
+        { id: 'customAutoplay', name: 'Custom Autoplay', desc: 'Independent autoplay engine with humanization, randomization and per-object type control. Never uses the site Auto mod.', group: 'Gameplay' },
         { id: 'beatmapTimeline', name: 'Beatmap Timeline', desc: 'Interactive timeline of upcoming hit objects.', group: 'Analysis' },
         { id: 'bpmGraph', name: 'BPM Graph', desc: 'BPM changes across the whole song.', group: 'Analysis' },
         { id: 'timingInspector', name: 'Timing Inspector', desc: 'Detailed timing-point information.', group: 'Analysis' },
@@ -250,7 +255,8 @@
         { id: 'currentObject', name: 'Current Object', x: 1.2, y: 28.0, w: 250, h: 84, color: '#ff8ab5', opacity: 0.86, font: 13, visible: false },
         { id: 'bpm', name: 'BPM / Timing', x: 78.0, y: 21.0, w: 210, h: 66, color: '#a970ff', opacity: 0.86, font: 13, visible: false },
         { id: 'density', name: 'Object Density', x: 1.2, y: 38.0, w: 230, h: 60, color: '#68b8ff', opacity: 0.86, font: 13, visible: false },
-        { id: 'warnings', name: 'Warnings', x: 35.0, y: 2.0, w: 300, h: 56, color: '#ff6b81', opacity: 0.9, font: 13, visible: false }
+        { id: 'warnings', name: 'Warnings', x: 35.0, y: 2.0, w: 300, h: 56, color: '#ff6b81', opacity: 0.9, font: 13, visible: false },
+        { id: 'autoplay', name: 'Autoplay', x: 35.0, y: 9.0, w: 300, h: 62, color: '#7ee787', opacity: 0.9, font: 13, visible: false }
     ];
 
     const DEFAULT_KEYBINDS = {
@@ -258,7 +264,8 @@
         compact: 'Alt+KeyC', nextSection: 'Alt+BracketRight', prevSection: 'Alt+BracketLeft',
         bookmark: 'Alt+KeyB', favorite: 'Alt+KeyF', exportStats: 'Alt+KeyS',
         cycleTheme: 'Alt+KeyT', toggleLightweight: 'Alt+KeyL', toggleCrosshair: 'Alt+KeyX',
-        openDebug: 'Alt+KeyD', resetHud: 'Alt+KeyR', openSearch: 'Alt+KeyK'
+        openDebug: 'Alt+KeyD', resetHud: 'Alt+KeyR', openSearch: 'Alt+KeyK',
+        toggleAutoplay: 'F9', openAutoplay: 'Alt+KeyA'
     };
     const BIND_ACTIONS = [
         { id: 'menu', name: 'Open / close menu' }, { id: 'toggleHud', name: 'Show / hide HUD' },
@@ -268,7 +275,8 @@
         { id: 'favorite', name: 'Toggle favorite beatmap' }, { id: 'exportStats', name: 'Export statistics' },
         { id: 'cycleTheme', name: 'Cycle theme' }, { id: 'toggleLightweight', name: 'Lightweight rendering' },
         { id: 'toggleCrosshair', name: 'Toggle crosshair' }, { id: 'openDebug', name: 'Open debug console' },
-        { id: 'resetHud', name: 'Reset HUD positions' }, { id: 'openSearch', name: 'Focus settings search' }
+        { id: 'resetHud', name: 'Reset HUD positions' }, { id: 'openSearch', name: 'Focus settings search' },
+        { id: 'toggleAutoplay', name: 'Arm / disarm custom autoplay' }, { id: 'openAutoplay', name: 'Open autoplay section' }
     ];
     const NOTIFY_TYPES = [
         { id: 'beatmapDetected', name: 'Beatmap detected' }, { id: 'songStarted', name: 'Song started' },
@@ -276,7 +284,7 @@
         { id: 'beatmapChanged', name: 'Beatmap changed' }, { id: 'syncLost', name: 'Synchronization lost' },
         { id: 'syncRestored', name: 'Synchronization restored' }, { id: 'configLoaded', name: 'Configuration loaded' },
         { id: 'performance', name: 'Performance warning' }, { id: 'trackingInit', name: 'Tracking initialized' },
-        { id: 'trackingUnavailable', name: 'Tracking unavailable' }, { id: 'info', name: 'General information' }
+        { id: 'trackingUnavailable', name: 'Tracking unavailable' }, { id: 'autoplay', name: 'Custom autoplay' }, { id: 'info', name: 'General information' }
     ];
 
     const DEFAULTS = {
@@ -288,6 +296,18 @@
         keybinds: clone(DEFAULT_KEYBINDS),
         notify: { enabled: true, duration: 3800, position: 'top-right', max: 5, radius: 8, blur: 16, opacity: 0.97, customColor: '', types: Object.fromEntries(NOTIFY_TYPES.map(n => [n.id, true])) },
         modules: Object.fromEntries(MODULE_IDS.map(id => [id, true])),
+        autoplay: {
+            enabled: false, autoStart: true, pauseWithMenu: true, blockSiteAuto: true,
+            preset: 'human', seed: 0, randomizeSeed: true,
+            timing: { offsetMs: 0, jitterMs: 9, distribution: 'gaussian', maxJitterMs: 40 },
+            aim: { errorPx: 3, errorPct: 0.16, microJitterPx: 0.6 },
+            cursor: { speed: 2600, smoothing: 0.32, snap: false },
+            keys: { mode: 'alternate', holdMs: 62, holdJitterMs: 14, leftCode: '', rightCode: '' },
+            circles: { enabled: true, missChance: 0 },
+            sliders: { enabled: true, missChance: 0, followPath: true, followErrorPx: 2.5, releaseEarlyMs: 12 },
+            spinners: { enabled: true, rpm: 320, radius: 82, direction: 'alternate', rpmJitter: 18 },
+            humanize: true
+        },
         visuals: {
             enabled: true, minimalHud: false, fullHud: true, trackingRange: 2200, upcomingCount: 8,
             circles: true, approach: true, sliderPaths: true, spinner: true, labels: true, ids: true,
@@ -348,7 +368,7 @@
     // =======================================================================
     const R = {
         booted: false, bootAt: now(), probeMode: 'none', probeInstalled: false,
-        site: { settings: null, offsets: null, lastBeatmap: '', uiScale: 1, mods: [], modSettings: {}, audioOffset: 0, beatmapOffset: 0, userOffsetMs: 0, rate: 1, hr: false, key: '', file: '' },
+        site: { settings: null, offsets: null, lastBeatmap: '', uiScale: 1, mods: [], modSettings: {}, audioOffset: 0, beatmapOffset: 0, userOffsetMs: 0, rate: 1, hr: false, key: '', file: '', keyLeft: 'KeyZ', keyRight: 'KeyX', mouseButtons: true },
         lib: { sets: [], dbOk: false, lastRead: 0, blobs: new Map(), parsed: new Map(), error: '' },
         beatmaps: new Map(), beatmap: null, beatmapKey: '', analysisBeatmap: null, analysisKey: '',
         recentDecodeAt: 0, lastDecoderBeatmap: null, beatmapSource: '',
@@ -369,7 +389,15 @@
         visual: { canvas: null, ctx: null, dpr: 1, w: 0, h: 0, lastDraw: 0, transform: null, canvasEl: null },
         searchIndex: [], lastSettingsPoll: 0, lastLibPoll: 0, lastThemeCheck: 0,
         probe: { hooks: {}, osuCount: 0, apiCount: 0, decodeCount: 0, errors: [] },
-        activeConfigName: '', analysisCache: new Map(), timelineHover: -1
+        activeConfigName: '', analysisCache: new Map(), timelineHover: -1,
+        autoplay: {
+            running: false, status: 'disarmed', plan: [], nextIndex: 0, seed: 0, rng: null,
+            cursor: { x: 256, y: 192 }, target: { x: 256, y: 192 }, down: { K1: false, K2: false },
+            releases: [], activeSlider: null, activeSpinner: null, spinAngle: 0, lastTick: 0,
+            lastPointerAt: 0, timer: null, startedAt: 0, playKey: '',
+            stats: { presses: 0, circles: 0, sliders: 0, spinners: 0, skipped: 0, releases: 0, pointerMoves: 0 },
+            lastError: ''
+        }
     };
 
     function moduleOn(id) { return !!cfg.modules[id]; }
@@ -1436,6 +1464,9 @@
         R.site.audioOffset = finite(s.audioOffset, 0);
         R.site.rate = modRate(R.site.mods, R.site.modSettings);
         R.site.hr = R.site.mods.includes('HR');
+        R.site.keyLeft = typeof s.keyLeft === 'string' && s.keyLeft ? s.keyLeft : 'KeyZ';
+        R.site.keyRight = typeof s.keyRight === 'string' && s.keyRight ? s.keyRight : 'KeyX';
+        R.site.mouseButtons = s.mouseButtons !== false;
         const lb = String(s.lastBeatmap || '');
         if (lb !== R.site.lastBeatmap) {
             R.site.lastBeatmap = lb;
@@ -1800,6 +1831,7 @@
             rate = 1; songTime = finite(a.media.currentTime, 0) * 1000; duration = finite(a.media.duration, 0) * 1000; playing = true;
         }
         const wasPlaying = a.playing;
+        a.lastStatePerf = performance.now();
         a.songTime = songTime; a.duration = Math.max(duration, a.decode ? a.decode.duration * 1000 : 0, R.beatmap ? R.beatmap.endTime : 0);
         a.rate = rate; a.playing = playing;
         a.offsetMs = a.startOffsetMs + R.site.userOffsetMs + finite(cfg.audio.offsetManualMs, 0);
@@ -1851,6 +1883,330 @@
             p.warn = 'frame'; logEvent('perf', 'High frame time: ' + round(p.frameTime, 1) + ' ms');
             setTimeout(() => { if (p.warn === 'frame') p.warn = ''; }, 10000);
         }
+    }
+
+    // =======================================================================
+    // 9b. Custom Autoplay engine — independent input layer (NOT the site Auto)
+    // =======================================================================
+    /* This engine never touches WOSU's AutoPlayer / Auto mod. It reads the same
+       decoded beatmap + audio clock the live suite uses, builds a per-object
+       plan, and synthesizes ordinary keyboard/pointer events into the page so
+       the game's normal input path judges them. Humanization/randomization are
+       fully configurable and seeded. No scores are written, no network calls. */
+    function mulberry32(seed) {
+        let a = seed >>> 0;
+        return function () {
+            a |= 0; a = (a + 0x6D2B79F5) | 0;
+            let t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function gauss(rng) {
+        let u = 0, v = 0;
+        while (u === 0) u = rng();
+        while (v === 0) v = rng();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+    function codeToKey(code) {
+        if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+        if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+        const map = { Space: ' ', Enter: 'Enter', ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Control', ControlRight: 'Control', AltLeft: 'Alt', AltRight: 'Alt', Tab: 'Tab', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/' };
+        return map[code] || code;
+    }
+    function autoSongTime() {
+        const a = R.audio;
+        if (!a.playing) return a.songTime;
+        const dt = clamp(performance.now() - finite(a.lastStatePerf, performance.now()), 0, 120);
+        return a.songTime + dt * a.rate;
+    }
+    function autoKeys() {
+        const k = cfg.autoplay.keys;
+        return {
+            K1: k.leftCode || R.site.keyLeft || 'KeyZ',
+            K2: k.rightCode || R.site.keyRight || 'KeyX'
+        };
+    }
+    function markSynthetic(e) { try { Object.defineProperty(e, '__woAutoplay', { value: true, configurable: true }); } catch { /* ignore */ } return e; }
+    function dispatchAutoKey(type, code) {
+        const e = new KeyboardEvent(type, { code, key: codeToKey(code), bubbles: true, cancelable: true, composed: true });
+        markSynthetic(e);
+        window.dispatchEvent(e);
+    }
+    function autoClientPoint(x, y) {
+        const t = playfieldTransform();
+        const canvas = $('#app canvas');
+        const rect = canvas ? canvas.getBoundingClientRect() : { left: 0, top: 0 };
+        return { x: rect.left + t.x + x * t.scale, y: rect.top + t.y + y * t.scale };
+    }
+    function dispatchAutoPointer(x, y, force) {
+        const ap = R.autoplay;
+        const tn = performance.now();
+        if (!force && tn - ap.lastPointerAt < 1) return;
+        const p = autoClientPoint(x, y);
+        // Pen-style absolute pointer events steer the gameplay cursor even when
+        // WOSU has the mouse pointer-locked (high precision / confine), because
+        // only mouse pointers are replaced by the lock's virtual cursor.
+        const e = new PointerEvent('pointermove', {
+            clientX: p.x, clientY: p.y, pointerId: 7777, pointerType: 'pen',
+            isPrimary: true, bubbles: true, cancelable: true, composed: true, buttons: 0, button: -1
+        });
+        markSynthetic(e);
+        window.dispatchEvent(e);
+        ap.lastPointerAt = tn;
+        ap.stats.pointerMoves++;
+    }
+    function autoPress(button) {
+        const ap = R.autoplay;
+        if (ap.down[button]) autoRelease(button);
+        ap.down[button] = true;
+        dispatchAutoKey('keydown', autoKeys()[button]);
+        ap.stats.presses++;
+    }
+    function autoRelease(button) {
+        const ap = R.autoplay;
+        if (!ap.down[button]) return;
+        ap.down[button] = false;
+        dispatchAutoKey('keyup', autoKeys()[button]);
+        ap.stats.releases++;
+    }
+    function autoReleaseAll() {
+        const ap = R.autoplay;
+        autoRelease('K1'); autoRelease('K2');
+        ap.releases.length = 0;
+        ap.activeSlider = null; ap.activeSpinner = null;
+    }
+    function sliderPointAt(o, t) {
+        if (!o.path) return { x: o.x, y: o.y };
+        const spans = o.slides || 1;
+        const spanDur = o.spanDuration || (o.duration || 1) / spans;
+        let p = (t - o.time) / Math.max(1e-6, spanDur);
+        let span = Math.floor(p);
+        let frac = p - span;
+        if (span >= spans) { span = spans - 1; frac = 1; }
+        if (span < 0) { span = 0; frac = 0; }
+        if (span % 2 === 1) frac = 1 - frac;
+        return o.path.pointAt(clamp(frac, 0, 1));
+    }
+    function buildAutoplayPlan() {
+        const ap = R.autoplay, b = R.beatmap, c = cfg.autoplay;
+        const seed = c.randomizeSeed || !c.seed ? ((now() ^ (Math.random() * 0xffffffff)) >>> 0) : (c.seed >>> 0);
+        ap.seed = seed;
+        const rng = mulberry32(seed);
+        ap.rng = rng;
+        const radius = b.difficulty.circleRadius || 32;
+        const win50 = b.difficulty.window50 || 150;
+        const jitterCap = Math.min(finite(c.timing.maxJitterMs, 40), win50 * 0.95);
+        const plan = [];
+        let alt = 0;
+        for (const o of b.objects) {
+            const typeCfg = c[o.kind === 'circle' ? 'circles' : o.kind === 'slider' ? 'sliders' : 'spinners'];
+            const enabled = typeCfg.enabled !== false;
+            const skip = enabled && finite(typeCfg.missChance, 0) > 0 && rng() * 100 < finite(typeCfg.missChance, 0);
+            let jitter = 0;
+            if (c.humanize && finite(c.timing.jitterMs, 0) > 0) {
+                jitter = c.timing.distribution === 'uniform' ? (rng() * 2 - 1) * c.timing.jitterMs : gauss(rng) * c.timing.jitterMs;
+                jitter = clamp(jitter, -jitterCap, jitterCap);
+            }
+            const pressAt = o.time + finite(c.timing.offsetMs, 0) + jitter;
+            let ax = o.x, ay = o.y;
+            if (o.kind !== 'spinner' && c.humanize) {
+                const ang = rng() * Math.PI * 2;
+                const mag = Math.abs(gauss(rng)) * finite(c.aim.errorPx, 0) + rng() * radius * finite(c.aim.errorPct, 0);
+                ax += Math.cos(ang) * mag; ay += Math.sin(ang) * mag;
+            }
+            let button;
+            const mode = c.keys.mode;
+            if (mode === 'random') button = rng() < 0.5 ? 'K1' : 'K2';
+            else if (mode === 'left') button = 'K1';
+            else if (mode === 'right') button = 'K2';
+            else button = (alt++ % 2 === 0) ? 'K1' : 'K2';
+            let hold = finite(c.keys.holdMs, 62);
+            if (c.humanize) hold += gauss(rng) * finite(c.keys.holdJitterMs, 0);
+            hold = clamp(hold, 12, 250);
+            let releaseAt;
+            if (o.kind === 'circle') releaseAt = pressAt + hold;
+            else if (o.kind === 'slider') releaseAt = Math.max(pressAt + 8, o.endTime - finite(c.sliders.releaseEarlyMs, 12));
+            else releaseAt = o.endTime;
+            let spinDir = 1;
+            if (o.kind === 'spinner') {
+                const d = c.spinners.direction;
+                spinDir = d === 'cw' ? 1 : d === 'ccw' ? -1 : d === 'random' ? (rng() < 0.5 ? 1 : -1) : (alt++ % 2 === 0 ? 1 : -1);
+            }
+            const rpm = clamp(finite(c.spinners.rpm, 320) + (c.humanize ? gauss(rng) * finite(c.spinners.rpmJitter, 0) : 0), 40, 477);
+            plan.push({
+                index: o.index, kind: o.kind, time: o.time, endTime: o.endTime,
+                x: o.x, y: o.y, aimX: ax, aimY: ay, pressAt, releaseAt, button,
+                skip: skip || !enabled, spinDir, rpm, obj: o,
+                followSeedX: gauss(rng), followSeedY: gauss(rng)
+            });
+        }
+        plan.sort((a, b2) => a.pressAt - b2.pressAt);
+        ap.plan = plan;
+        ap.nextIndex = 0;
+        ap.releases.length = 0;
+        ap.activeSlider = null; ap.activeSpinner = null;
+        ap.stats = { presses: 0, circles: 0, sliders: 0, spinners: 0, skipped: 0, releases: 0, pointerMoves: 0 };
+        return plan;
+    }
+    function autoStartRun() {
+        const ap = R.autoplay;
+        buildAutoplayPlan();
+        ap.running = true;
+        ap.startedAt = now();
+        ap.playKey = R.beatmapKey + '|' + R.audio.playStartedAt;
+        ap.lastTick = performance.now();
+        ap.spinAngle = 0;
+        const t0 = autoSongTime();
+        while (ap.nextIndex < ap.plan.length && ap.plan[ap.nextIndex].pressAt < t0 - 60) {
+            if (ap.plan[ap.nextIndex].skip) ap.stats.skipped++;
+            ap.nextIndex++;
+        }
+        const first = ap.plan.slice(ap.nextIndex).find(p => !p.skip);
+        ap.cursor = { x: first ? first.aimX : 256, y: first ? first.aimY : 192 };
+        ap.target = { ...ap.cursor };
+        ap.status = 'running';
+        ap.lastError = '';
+        logEvent('autoplay', 'Custom autoplay started · ' + ap.plan.length + ' objects · seed ' + ap.seed);
+        notify('autoplay', 'Custom autoplay running', ap.plan.length + ' objects · independent engine');
+        dispatchAutoPointer(ap.cursor.x, ap.cursor.y, true);
+    }
+    function autoStopRun(reason) {
+        const ap = R.autoplay;
+        autoReleaseAll();
+        if (ap.running) logEvent('autoplay', 'Custom autoplay stopped' + (reason ? ' · ' + reason : ''));
+        ap.running = false;
+        ap.status = cfg.autoplay.enabled ? 'armed' : 'disarmed';
+    }
+    function autoplayBlocked() {
+        const c = cfg.autoplay;
+        if (c.blockSiteAuto && R.site.mods.includes('AT')) return 'Site Auto mod (AT) is on — turn it off to use custom autoplay';
+        return '';
+    }
+    function autoplayTick() {
+        const ap = R.autoplay, c = cfg.autoplay;
+        if (!moduleOn('customAutoplay') || !c.enabled) {
+            if (ap.running) autoStopRun('disarmed');
+            ap.status = moduleOn('customAutoplay') ? 'disarmed' : 'module off';
+            return;
+        }
+        const blocked = autoplayBlocked();
+        if (blocked) { if (ap.running) autoStopRun('blocked'); ap.status = 'blocked'; ap.lastError = blocked; return; }
+        const playing = R.audio.inPlay && R.audio.playing && !!R.beatmap && !document.hidden && (!!R.audio.active || !!(R.audio.worklet && R.audio.worklet.active));
+        if (!playing) { if (ap.running) autoStopRun('playback ended'); ap.status = 'armed'; return; }
+        if (c.pauseWithMenu && cfg.menuOpen) { if (ap.running) { autoReleaseAll(); ap.status = 'paused (menu)'; } return; }
+        const t = autoSongTime();
+        if (R.beatmap.endTime && t > R.beatmap.endTime + 1500) { if (ap.running) autoStopRun('map complete'); ap.status = 'armed'; return; }
+        const playKey = R.beatmapKey + '|' + R.audio.playStartedAt;
+        if (!ap.running || ap.playKey !== playKey) {
+            if (!c.autoStart && !ap.running) { ap.status = 'armed (manual)'; return; }
+            autoReleaseAll();
+            autoStartRun();
+        }
+        const tn = performance.now();
+        const dt = clamp((tn - ap.lastTick) / 1000, 0, 0.05);
+        ap.lastTick = tn;
+
+        // releases due
+        for (let i = ap.releases.length - 1; i >= 0; i--) {
+            if (t >= ap.releases[i].time) { autoRelease(ap.releases[i].button); ap.releases.splice(i, 1); }
+        }
+        // presses due
+        while (ap.nextIndex < ap.plan.length && t >= ap.plan[ap.nextIndex].pressAt) {
+            const p = ap.plan[ap.nextIndex++];
+            if (p.skip) { ap.stats.skipped++; continue; }
+            // If we fell far behind (menu pause, lag spike, seek), drop the note
+            // instead of firing a hopelessly late press.
+            if (t - p.pressAt > 180) { ap.stats.skipped++; continue; }
+            // guarantee the cursor is on the object at the moment of the press
+            const radius = R.beatmap.difficulty.circleRadius || 32;
+            const dx = p.aimX - ap.cursor.x, dy = p.aimY - ap.cursor.y;
+            if (p.kind !== 'spinner' && Math.hypot(dx, dy) > radius * 0.95) { ap.cursor.x = p.aimX; ap.cursor.y = p.aimY; }
+            if (p.kind === 'spinner') { ap.cursor.x = 256; ap.cursor.y = 192; ap.spinAngle = 0; }
+            dispatchAutoPointer(ap.cursor.x, ap.cursor.y, true);
+            autoPress(p.button);
+            ap.releases.push({ time: p.releaseAt, button: p.button });
+            ap.stats[p.kind === 'circle' ? 'circles' : p.kind === 'slider' ? 'sliders' : 'spinners']++;
+            if (p.kind === 'slider') ap.activeSlider = p;
+            else if (p.kind === 'spinner') ap.activeSpinner = p;
+        }
+        // choose cursor target
+        let target = null;
+        if (ap.activeSlider && t >= ap.activeSlider.pressAt && t <= ap.activeSlider.releaseAt + 40) {
+            const o = ap.activeSlider.obj;
+            const pt = cfg.autoplay.sliders.followPath === false ? { x: o.x, y: o.y } : sliderPointAt(o, t);
+            const fe = cfg.autoplay.humanize ? finite(cfg.autoplay.sliders.followErrorPx, 0) : 0;
+            target = { x: pt.x + ap.activeSlider.followSeedX * fe, y: pt.y + ap.activeSlider.followSeedY * fe };
+            if (t > ap.activeSlider.releaseAt) ap.activeSlider = null;
+        } else if (ap.activeSpinner && t >= ap.activeSpinner.pressAt && t <= ap.activeSpinner.endTime) {
+            const sp = ap.activeSpinner;
+            ap.spinAngle += sp.spinDir * (sp.rpm / 60) * Math.PI * 2 * dt;
+            const r = finite(c.spinners.radius, 82);
+            target = { x: 256 + Math.cos(ap.spinAngle) * r, y: 192 + Math.sin(ap.spinAngle) * r };
+            if (t > sp.endTime) ap.activeSpinner = null;
+        } else {
+            if (ap.activeSlider && t > ap.activeSlider.releaseAt) ap.activeSlider = null;
+            if (ap.activeSpinner && t > ap.activeSpinner.endTime) ap.activeSpinner = null;
+            const next = ap.plan[ap.nextIndex];
+            target = next ? { x: next.aimX, y: next.aimY } : { x: ap.cursor.x, y: ap.cursor.y };
+        }
+        ap.target = target;
+        // move cursor (humanized speed + smoothing)
+        const cc = c.cursor;
+        if (cc.snap || !c.humanize) {
+            ap.cursor.x = target.x; ap.cursor.y = target.y;
+        } else {
+            const k = 1 - Math.pow(clamp(finite(cc.smoothing, 0.32), 0, 0.95), dt * 60);
+            let nx = ap.cursor.x + (target.x - ap.cursor.x) * k;
+            let ny = ap.cursor.y + (target.y - ap.cursor.y) * k;
+            const ddx = nx - ap.cursor.x, ddy = ny - ap.cursor.y;
+            const d = Math.hypot(ddx, ddy);
+            const maxStep = Math.max(1, finite(cc.speed, 2600)) * dt;
+            if (d > maxStep && d > 0) { nx = ap.cursor.x + ddx / d * maxStep; ny = ap.cursor.y + ddy / d * maxStep; }
+            ap.cursor.x = nx; ap.cursor.y = ny;
+            if (finite(c.aim.microJitterPx, 0) > 0) {
+                ap.cursor.x += gauss(ap.rng) * c.aim.microJitterPx * 0.4;
+                ap.cursor.y += gauss(ap.rng) * c.aim.microJitterPx * 0.4;
+            }
+        }
+        dispatchAutoPointer(ap.cursor.x, ap.cursor.y, false);
+        ap.status = 'running';
+    }
+    function applyAutoplayPreset(name) {
+        const presets = {
+            robot: { humanize: false, timing: { offsetMs: 0, jitterMs: 0, distribution: 'gaussian', maxJitterMs: 0 }, aim: { errorPx: 0, errorPct: 0, microJitterPx: 0 }, cursor: { speed: 100000, smoothing: 0, snap: true }, keys: { mode: 'alternate', holdMs: 40, holdJitterMs: 0 }, circles: { enabled: true, missChance: 0 }, sliders: { enabled: true, missChance: 0, followPath: true, followErrorPx: 0, releaseEarlyMs: 0 }, spinners: { enabled: true, rpm: 400, radius: 82, direction: 'alternate', rpmJitter: 0 } },
+            human: { humanize: true, timing: { offsetMs: 0, jitterMs: 9, distribution: 'gaussian', maxJitterMs: 40 }, aim: { errorPx: 3, errorPct: 0.16, microJitterPx: 0.6 }, cursor: { speed: 2600, smoothing: 0.32, snap: false }, keys: { mode: 'alternate', holdMs: 62, holdJitterMs: 14 }, circles: { enabled: true, missChance: 0 }, sliders: { enabled: true, missChance: 0, followPath: true, followErrorPx: 2.5, releaseEarlyMs: 12 }, spinners: { enabled: true, rpm: 320, radius: 82, direction: 'alternate', rpmJitter: 18 } },
+            relaxed: { humanize: true, timing: { offsetMs: 0, jitterMs: 18, distribution: 'gaussian', maxJitterMs: 60 }, aim: { errorPx: 6, errorPct: 0.3, microJitterPx: 1.2 }, cursor: { speed: 1800, smoothing: 0.5, snap: false }, keys: { mode: 'alternate', holdMs: 80, holdJitterMs: 22 }, circles: { enabled: true, missChance: 1 }, sliders: { enabled: true, missChance: 1, followPath: true, followErrorPx: 5, releaseEarlyMs: 20 }, spinners: { enabled: true, rpm: 260, radius: 90, direction: 'alternate', rpmJitter: 30 } },
+            legit: { humanize: true, timing: { offsetMs: 0, jitterMs: 13, distribution: 'gaussian', maxJitterMs: 50 }, aim: { errorPx: 4, errorPct: 0.22, microJitterPx: 0.9 }, cursor: { speed: 2200, smoothing: 0.42, snap: false }, keys: { mode: 'random', holdMs: 70, holdJitterMs: 18 }, circles: { enabled: true, missChance: 0.5 }, sliders: { enabled: true, missChance: 0.5, followPath: true, followErrorPx: 3.5, releaseEarlyMs: 16 }, spinners: { enabled: true, rpm: 290, radius: 86, direction: 'random', rpmJitter: 24 } }
+        };
+        const p = presets[name];
+        if (!p) return;
+        cfg.autoplay = mergeDeep(cfg.autoplay, p);
+        cfg.autoplay.preset = name;
+        saveConfig();
+        if (R.autoplay.running) autoStopRun('preset changed');
+        refreshActiveSection(true);
+        notify('autoplay', 'Autoplay preset', name);
+        logEvent('autoplay', 'Preset applied: ' + name);
+    }
+    function startAutoplayNow() {
+        if (!moduleOn('customAutoplay')) { notify('autoplay', 'Module disabled', 'Enable Custom Autoplay in Module Manager.'); return; }
+        const blocked = autoplayBlocked();
+        if (blocked) { notify('autoplay', 'Blocked', blocked); return; }
+        if (!R.beatmap) { notify('autoplay', 'No beatmap', 'Load a difficulty in WOSU first.'); return; }
+        if (!(R.audio.inPlay && R.audio.playing)) { notify('autoplay', 'Not playing', 'Start the map in WOSU first (or enable Auto start).'); return; }
+        cfg.autoplay.enabled = true; saveConfig();
+        autoReleaseAll();
+        autoStartRun();
+        refreshActiveSection(true);
+    }
+    function toggleAutoplay() {
+        cfg.autoplay.enabled = !cfg.autoplay.enabled;
+        saveConfig();
+        if (!cfg.autoplay.enabled) autoStopRun('disarmed');
+        else { R.autoplay.status = 'armed'; notify('autoplay', 'Custom autoplay armed', 'Start a map in WOSU (site Auto mod off).'); }
+        refreshActiveSection(true);
+        logEvent('autoplay', cfg.autoplay.enabled ? 'Armed' : 'Disarmed');
     }
 
     // =======================================================================
@@ -2320,6 +2676,10 @@
                 return '<b>' + (cp ? fmtNum(60000 / cp.beatLength, 1) : '—') + ' BPM</b><br><span>meter ' + (cp ? cp.meter : '—') + ' · SV ' + (cp ? round(cp.sliderVelocity, 2) : '—') + 'x</span><br><small>' + (cp && cp.kiai ? 'KIAI' : 'normal') + (an ? ' · range ' + fmtNum(an.bpmMin, 0) + '-' + fmtNum(an.bpmMax, 0) : '') + '</small>';
             }
             case 'density': return '<b>' + round(R.tracking.density, 1) + ' obj/s</b><br><span>spacing ' + round(R.tracking.spacing, 0) + ' px</span><br><small>' + (an ? 'peak section ' + (an.highDensity[0] ? fmtTime(an.highDensity[0].start) : '—') : '—') + '</small>';
+            case 'autoplay': {
+                const ap = R.autoplay;
+                return '<b>' + (ap.running ? 'AUTOPLAY RUNNING' : cfg.autoplay.enabled ? 'ARMED' : 'DISARMED') + '</b><br><span>' + ap.stats.presses + ' presses · ' + ap.stats.skipped + ' skipped · seed ' + ap.seed + '</span><br><small>' + esc(ap.status) + ' · ' + esc(cfg.autoplay.preset) + '</small>';
+            }
             case 'warnings': {
                 const w = [];
                 if (R.perf.warn) w.push(R.perf.warn === 'fps' ? 'Low FPS' : 'High frame time');
@@ -2596,6 +2956,8 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         if (path === 'theme' || path === 'accent' || path === 'accent2' || path === 'opacity' || path === 'uiScale' || path === 'notify.radius' || path === 'notify.blur') applyTheme(true);
         if (path.startsWith('visuals.') || path.startsWith('hud.') || path.startsWith('perf.')) applyUiState();
         if (path === 'autoTheme.enabled') autoThemeTick();
+        if (path === 'autoplay.enabled' && !value) { try { autoStopRun('disarmed'); } catch { /* ignore */ } }
+        if (path === 'autoplay.preset') { applyAutoplayPreset(value); return; }
         if (path === 'visuals.enabled' || path === 'visuals.crosshair.enabled' || path.startsWith('perf.')) logEvent('config', path + ' = ' + String(value));
         refreshActiveSection(true);
     }
@@ -2767,7 +3129,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
             items.appendChild(item);
         }
         side.appendChild(items);
-        side.appendChild(el('div', { class: 'wo-side-foot', html: '<b>WOSU LIVE SUITE</b><br>v' + VERSION + ' · ' + Store.mode + '<br>read-only integration' }));
+        side.appendChild(el('div', { class: 'wo-side-foot', html: '<b>WOSU LIVE SUITE</b><br>v' + VERSION + ' · ' + Store.mode + '<br>live tracking + custom autoplay' }));
         const content = el('div', { class: 'wo-content', id: 'wo-content' });
         const searchResults = el('div', { class: 'wo-section wo-search-results', id: 'wo-search-results' });
         content.appendChild(searchResults);
@@ -2960,6 +3322,9 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         add('Frame loop', R.perf.frameRate > 0, Math.round(R.perf.frameRate) + ' fps observed · ' + R.perf.frames + ' callbacks');
         add('Online API capture', R.online.count > 0, R.online.count + ' responses · ' + R.online.results.length + ' rows');
         add('Probe errors', R.probe.errors.length === 0, R.probe.errors.length ? R.probe.errors.length + ' hook errors' : 'none', 'bad');
+        add('Custom autoplay', moduleOn('customAutoplay'), moduleOn('customAutoplay') ? (cfg.autoplay.enabled ? 'armed · ' + R.autoplay.status + ' · ' + R.autoplay.plan.length + ' planned' : 'disarmed') : 'module disabled');
+        add('Autoplay input keys', true, autoKeys().K1 + ' / ' + autoKeys().K2 + ' (from WOSU settings)');
+        add('Site Auto mod (AT)', !R.site.mods.includes('AT'), R.site.mods.includes('AT') ? 'ON — custom autoplay blocked (input disabled by site)' : 'off — custom autoplay can drive input');
         R.integration = checks;
         return checks;
     }
@@ -2972,7 +3337,8 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
             analysis: an ? { total: an.total, circles: an.circles, sliders: an.sliders, spinners: an.spinners, bpmMin: an.bpmMin, bpmMax: an.bpmMax, spacing: an.spacing, sections: an.sections } : null,
             performance: { fps: R.perf.frameRate, frameMs: R.perf.frameTime, fpsHistory: R.perf.fpsHistory, renderHistory: R.perf.renderHistory },
             audio: { rate: R.audio.rate, offsetMs: R.audio.offsetMs, driftMs: R.audio.driftMs, ctxState: R.audio.ctxState },
-            favorites: session.favorites, bookmarks: session.bookmarks, history: session.history.slice(0, 30)
+            favorites: session.favorites, bookmarks: session.bookmarks, history: session.history.slice(0, 30),
+            autoplay: { enabled: cfg.autoplay.enabled, preset: cfg.autoplay.preset, status: R.autoplay.status, seed: R.autoplay.seed, stats: R.autoplay.stats, settings: cfg.autoplay }
         };
         if (format === 'csv') {
             const rows = [['metric', 'value']];
@@ -3089,6 +3455,107 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
                         }, { maxHeight: 190 })),
                     card('Integration', 'Runtime hooks currently attached to WOSU.', kv(() => diagnostics().map(c => (c.status === 'ok' ? '✓ ' : c.status === 'bad' ? '✕ ' : '! ') + c.name + ': ' + c.detail).join('\n')))
                 ]);
+            }
+            // ---------------------------------------------------------------- Autoplay
+            case 'autoplay': {
+                const ap = R.autoplay;
+                const engine = moduleCard('customAutoplay', 'Custom autoplay engine', 'Independent input layer. Reads the decoded beatmap + audio clock and synthesizes normal key/pointer events. Never uses WOSU’s Auto mod / AutoPlayer.', () => [
+                    el('div', { class: 'wo-note', html: '<b>Not the site autoplay.</b> This is your own engine: it detects every circle, slider and spinner from the real .osu data and drives the game through ordinary input events, with configurable humanization and randomization. It does not write scores, bypass anything or make network calls. Use it only where automation is allowed.' }),
+                    toggle('autoplay.enabled', 'Arm custom autoplay', 'Master arm switch. When armed, a run starts automatically with gameplay (Auto start). F9 toggles this.'),
+                    toggle('autoplay.autoStart', 'Auto start with gameplay', 'Begin playing as soon as WOSU starts a map. Turn off to arm manually.'),
+                    toggle('autoplay.pauseWithMenu', 'Pause while this menu is open', 'Release keys and pause the engine while the suite menu is open so you can tweak settings safely.'),
+                    toggle('autoplay.blockSiteAuto', 'Block when site Auto (AT) is selected', 'Refuse to run if WOSU’s own Auto mod is on (the site disables normal input in that mode).'),
+                    toggle('autoplay.humanize', 'Humanize', 'Master switch for timing/aim/cursor/hold randomization. Off = perfectly robotic.'),
+                    statGrid([
+                        { label: 'Status', get: () => R.autoplay.status.toUpperCase(), cls: 'good' },
+                        { label: 'Engine', get: () => R.autoplay.running ? 'RUNNING' : cfg.autoplay.enabled ? 'ARMED' : 'DISARMED' },
+                        { label: 'Preset', get: () => cfg.autoplay.preset },
+                        { label: 'Planned objects', get: () => R.autoplay.plan.length || (R.beatmap ? R.beatmap.objects.length : 0) },
+                        { label: 'Progress', get: () => R.autoplay.plan.length ? Math.min(R.autoplay.nextIndex, R.autoplay.plan.length) + ' / ' + R.autoplay.plan.length : '—' },
+                        { label: 'Presses sent', get: () => R.autoplay.stats.presses },
+                        { label: 'Circles / sliders / spinners', get: () => R.autoplay.stats.circles + ' / ' + R.autoplay.stats.sliders + ' / ' + R.autoplay.stats.spinners },
+                        { label: 'Skipped (intentional)', get: () => R.autoplay.stats.skipped },
+                        { label: 'Pointer moves', get: () => R.autoplay.stats.pointerMoves },
+                        { label: 'Seed', get: () => R.autoplay.seed || cfg.autoplay.seed || 'random' },
+                        { label: 'Input keys', get: () => autoKeys().K1 + ' / ' + autoKeys().K2 },
+                        { label: 'Song time', get: () => fmtTimePrecise(autoSongTime()) },
+                        { label: 'Cursor (playfield)', get: () => Math.round(R.autoplay.cursor.x) + ', ' + Math.round(R.autoplay.cursor.y) },
+                        { label: 'Site Auto mod', get: () => R.site.mods.includes('AT') ? 'ON (blocked)' : 'off', cls: 'warn' }
+                    ], 'tight'),
+                    btnbar([
+                        btn('Arm / disarm (F9)', toggleAutoplay, 'primary'),
+                        btn('Start run now', startAutoplayNow),
+                        btn('Stop now', () => { autoStopRun('manual stop'); refreshActiveSection(true); }, 'danger'),
+                        btn('Rebuild plan', () => { autoStopRun('rebuild'); if (R.beatmap) { buildAutoplayPlan(); notify('autoplay', 'Plan rebuilt', R.autoplay.plan.length + ' objects · seed ' + R.autoplay.seed); } refreshActiveSection(true); }),
+                        btn('Randomize seed', () => { cfg.autoplay.seed = ((now() ^ (Math.random() * 0xffffffff)) >>> 0); cfg.autoplay.randomizeSeed = false; saveConfig(); refreshActiveSection(true); }, 'small'),
+                        btn('Diagnostics', () => setSection('debug'), 'small')
+                    ]),
+                    el('div', { class: 'wo-note', text: 'Timing, aim, key choice and hold randomization are sampled when a run starts. Change them, then press Rebuild plan (or restart the map) to apply. Cursor speed/smoothing, slider follow and spinner radius update live.' })
+                ]);
+                const presets = card('Presets', 'One-click starting points. You can fine-tune everything below afterwards.', [
+                    btnbar([
+                        btn('Robot (perfect)', () => applyAutoplayPreset('robot'), 'small'),
+                        btn('Human (default)', () => applyAutoplayPreset('human'), 'small primary'),
+                        btn('Relaxed', () => applyAutoplayPreset('relaxed'), 'small'),
+                        btn('Legit-looking', () => applyAutoplayPreset('legit'), 'small')
+                    ]),
+                    kv(() => 'Active preset: ' + cfg.autoplay.preset + '\nHumanize: ' + (cfg.autoplay.humanize ? 'on' : 'off') + '\nSeed: ' + (cfg.autoplay.randomizeSeed ? 'random each run' : cfg.autoplay.seed))
+                ]);
+                const timing = card('Timing humanization', 'When each note is hit relative to its exact object time.', [
+                    rangeCtl('autoplay.timing.offsetMs', 'Global hit offset', 'Shift every hit earlier (−) or later (+).', -100, 100, 1, ' ms'),
+                    rangeCtl('autoplay.timing.jitterMs', 'Timing jitter (σ)', 'Random per-note timing deviation.', 0, 60, 0.5, ' ms'),
+                    rangeCtl('autoplay.timing.maxJitterMs', 'Jitter clamp', 'Hard cap so jitter never exceeds the hit window.', 0, 150, 1, ' ms'),
+                    selectCtl('autoplay.timing.distribution', 'Distribution', 'Shape of the timing randomization.', [{ value: 'gaussian', label: 'Gaussian (natural)' }, { value: 'uniform', label: 'Uniform' }])
+                ]);
+                const aim = card('Aim randomization', 'Where the cursor lands on each circle/slider head.', [
+                    rangeCtl('autoplay.aim.errorPx', 'Aim error (px)', 'Gaussian scatter in playfield pixels.', 0, 40, 0.5, ' px'),
+                    rangeCtl('autoplay.aim.errorPct', 'Aim error (% radius)', 'Extra scatter as a fraction of the circle radius.', 0, 1, 0.01, ''),
+                    rangeCtl('autoplay.aim.microJitterPx', 'Cursor micro-jitter', 'Tiny continuous hand tremor while moving.', 0, 5, 0.1, ' px')
+                ]);
+                const cursor = card('Cursor movement', 'How the cursor travels between objects.', [
+                    rangeCtl('autoplay.cursor.speed', 'Max cursor speed', 'Playfield pixels per second.', 200, 20000, 50, ' px/s'),
+                    rangeCtl('autoplay.cursor.smoothing', 'Smoothing', 'Higher = lazier, more human approach.', 0, 0.9, 0.01, ''),
+                    toggle('autoplay.cursor.snap', 'Snap cursor (robotic)', 'Teleport instantly to each target instead of gliding.')
+                ]);
+                const keys = card('Keys & holds', 'Which gameplay keys are pressed and for how long.', [
+                    selectCtl('autoplay.keys.mode', 'Key mode', 'How K1/K2 are chosen.', [{ value: 'alternate', label: 'Alternate K1/K2' }, { value: 'random', label: 'Random' }, { value: 'left', label: 'Always K1' }, { value: 'right', label: 'Always K2' }]),
+                    rangeCtl('autoplay.keys.holdMs', 'Circle hold time', 'How long a key stays down per circle.', 10, 250, 1, ' ms'),
+                    rangeCtl('autoplay.keys.holdJitterMs', 'Hold jitter (σ)', 'Randomize hold duration.', 0, 60, 1, ' ms'),
+                    textCtl('autoplay.keys.leftCode', 'K1 key code override', 'Blank = use WOSU’s left key (default KeyZ).', 'KeyZ'),
+                    textCtl('autoplay.keys.rightCode', 'K2 key code override', 'Blank = use WOSU’s right key (default KeyX).', 'KeyX'),
+                    kv(() => 'Effective keys: ' + autoKeys().K1 + ' / ' + autoKeys().K2 + '\nWOSU settings keys: ' + R.site.keyLeft + ' / ' + R.site.keyRight)
+                ]);
+                const objects = card('Per-object behavior', 'Enable/disable object types and add intentional misses.', [
+                    toggle('autoplay.circles.enabled', 'Play circles', 'Hit hit circles.'),
+                    rangeCtl('autoplay.circles.missChance', 'Circle miss chance', 'Percent of circles intentionally skipped.', 0, 100, 0.5, ' %'),
+                    toggle('autoplay.sliders.enabled', 'Play sliders', 'Hit slider heads and follow the ball.'),
+                    rangeCtl('autoplay.sliders.missChance', 'Slider miss chance', 'Percent of sliders intentionally skipped.', 0, 100, 0.5, ' %'),
+                    toggle('autoplay.sliders.followPath', 'Follow slider path', 'Track the slider ball along its curve (off = stay on head).'),
+                    rangeCtl('autoplay.sliders.followErrorPx', 'Slider follow error', 'Scatter while following the ball.', 0, 30, 0.5, ' px'),
+                    rangeCtl('autoplay.sliders.releaseEarlyMs', 'Release before tail', 'Let go this many ms before the slider ends.', 0, 120, 1, ' ms'),
+                    toggle('autoplay.spinners.enabled', 'Play spinners', 'Hold and spin through spinners.'),
+                    rangeCtl('autoplay.spinners.rpm', 'Spinner RPM', 'Target spin speed (site cap ≈ 477 RPM).', 60, 477, 1, ' rpm'),
+                    rangeCtl('autoplay.spinners.rpmJitter', 'Spinner RPM jitter (σ)', 'Randomize spin speed.', 0, 80, 1, ' rpm'),
+                    rangeCtl('autoplay.spinners.radius', 'Spinner radius', 'Cursor orbit radius in playfield px.', 20, 180, 1, ' px'),
+                    selectCtl('autoplay.spinners.direction', 'Spin direction', 'Which way to orbit.', [{ value: 'alternate', label: 'Alternate' }, { value: 'cw', label: 'Clockwise' }, { value: 'ccw', label: 'Counter-clockwise' }, { value: 'random', label: 'Random' }])
+                ]);
+                const seedCard = card('Randomization seed', 'Reproducible runs. Same seed + same map = same humanization.', [
+                    toggle('autoplay.randomizeSeed', 'Randomize seed each run', 'Pick a fresh seed every time a run starts.'),
+                    numberCtl('autoplay.seed', 'Fixed seed', 'Used when randomize is off (0 = random).', 0, 4294967295, 1, ''),
+                    btnbar([btn('New random seed', () => { cfg.autoplay.seed = ((now() ^ (Math.random() * 0xffffffff)) >>> 0); cfg.autoplay.randomizeSeed = false; saveConfig(); refreshActiveSection(true); }, 'small')])
+                ]);
+                const plan = card('Live plan', 'The next objects the engine will play, with sampled timing and key choice.', [
+                    tableWrap(['#', 'Type', 'Hit time', 'Δ offset', 'Key', 'Action'], () => {
+                        const rows = [];
+                        const start = Math.max(0, R.autoplay.nextIndex - 2);
+                        for (let i = start; i < Math.min(R.autoplay.plan.length, start + 14); i++) {
+                            const p = R.autoplay.plan[i];
+                            rows.push({ cells: [numberCell(p.index + 1), esc(p.kind), esc(fmtTimePrecise(p.pressAt)), numberCell(round(p.pressAt - p.time, 1) + ' ms'), esc(p.button), p.skip ? pill('SKIP', 'warn') : pill('HIT', 'ok')] });
+                        }
+                        return rows;
+                    }, { maxHeight: 300 })
+                ]);
+                return el('div', {}, [engine, presets, timing, aim, cursor, keys, objects, seedCard, plan]);
             }
             // ---------------------------------------------------------------- Live Tracking
             case 'tracking': {
@@ -4239,7 +4706,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
                     moduleCard('shortcutEditor', 'Keyboard shortcut editor', 'Click a key then press any combination to assign it.', () => [
                         keybindRows(),
                         btnbar([btn('Reset keybinds', () => { cfg.keybinds = clone(DEFAULT_KEYBINDS); saveConfig(); refreshActiveSection(true); notify('configLoaded', 'Keybinds reset', 'Default shortcuts restored.'); }, 'small danger')]),
-                        el('div', { class: 'wo-note', text: 'Right Shift is the default menu key. Shortcuts only fire on their exact combination and never synthesize gameplay input.' })
+                        el('div', { class: 'wo-note', text: 'Right Shift is the default menu key. Menu shortcuts only fire on their exact combination. The separate Custom Autoplay engine (Autoplay section / F9) is the only part that synthesizes gameplay input.' })
                     ]),
                     moduleCard('customNotifications', 'Notification settings', 'Appearance, duration and per-event toggles.', () => [
                         toggle('notify.enabled', 'Enable notifications', 'Master notification switch.'),
@@ -4264,7 +4731,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
                         kv(() => ['Storage backend: ' + Store.mode, 'Active config: ' + activeConfigName(), 'Configurations: ' + configs.list.length, 'Session started: ' + new Date(session.startedAt).toLocaleString(), 'Stored keys: ' + Store.keys().join(', ')].join('\n'))
                     ]),
                     card('About', 'WOSU — Advanced Live Enhancement Suite', [
-                        el('div', { class: 'wo-note', html: '<b>Version ' + VERSION + '</b> · Tampermonkey userscript for https://wosu.dino.icu/*<br><br>This suite is read-only: it observes WOSU\'s decoded beatmaps, Web Audio clock, frame loop and IndexedDB library. It does not send input, alter scores, bypass anything or contact any server.<br><br>Integration points are verified against the WOSU source repository (parser, archive, MusicTrack, AudioEngine, PlayerScreen, Settings, idb).' }),
+                        el('div', { class: 'wo-note', html: '<b>Version ' + VERSION + '</b> · Tampermonkey userscript for https://wosu.dino.icu/*<br><br>The live suite observes WOSU\'s decoded beatmaps, Web Audio clock, frame loop and IndexedDB library. The optional <b>Custom Autoplay</b> engine is an independent input layer: it never uses the site\'s Auto mod / AutoPlayer, never writes scores, bypasses nothing and contacts no server. It synthesizes normal keyboard/pointer events from the decoded beatmap with configurable humanization and randomization.<br><br>Integration points are verified against the WOSU source repository (parser, archive, MusicTrack, AudioEngine, PlayerScreen, GameplayInput, Settings, idb).' }),
                         btnbar([btn('Open diagnostics', () => setSection('debug'), 'small'), btn('Open module manager', () => setSection('modules'), 'small')])
                     ])
                 ]);
@@ -4393,7 +4860,8 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
             colorPresets: 'visuals', hudProfiles: 'hud', densityHeatmap: 'analyzer', audioWaveform: 'audio', timingDriftGraph: 'audio',
             liveEventLog: 'session', debugConsole: 'debug', moduleManager: 'modules', customNotifications: 'settings',
             shortcutEditor: 'settings', compactMode: 'session', statsExport: 'session', autoTheme: 'settings',
-            objectPreview: 'timeline', sectionBookmarks: 'session', configBackup: 'configs', integrationDiagnostics: 'debug', performancePresets: 'performance'
+            objectPreview: 'timeline', sectionBookmarks: 'session', configBackup: 'configs', integrationDiagnostics: 'debug', performancePresets: 'performance',
+            customAutoplay: 'autoplay'
         };
         dyn(box, () => {
             const q = (R.ui.moduleQuery || '').toLowerCase();
@@ -4468,6 +4936,8 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
             case 'openDebug': setMenuOpen(true); setSection('debug'); break;
             case 'resetHud': resetHudPositions(); break;
             case 'openSearch': { setMenuOpen(true); const s = $('#wo-search-input'); if (s) { s.focus(); s.select(); } break; }
+            case 'toggleAutoplay': toggleAutoplay(); break;
+            case 'openAutoplay': setMenuOpen(true); setSection('autoplay'); break;
         }
     }
 
@@ -4535,6 +5005,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         ownFrames++;
         if (ts - ownWindowAt >= 500) { R.perf.ownFps = ownFrames * 1000 / (ts - ownWindowAt); ownFrames = 0; ownWindowAt = ts; }
         if (document.hidden) return;
+        try { if (cfg.autoplay.enabled && moduleOn('customAutoplay')) autoplayTick(); } catch (e) { logError('autoplayTick', e); }
         const interval = clamp(finite(cfg.perf.canvasIntervalMs, 16), 8, 1000);
         if (cfg.visuals.enabled && ts - R.visual.lastDraw >= interval) {
             R.visual.lastDraw = ts;
@@ -4558,6 +5029,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
     }
 
     function onKeyDown(e) {
+        if (e.__woAutoplay) return; // never treat our own synthesized input as a shortcut
         if (R.captureAction) {
             e.preventDefault(); e.stopPropagation();
             if (e.key === 'Escape') { R.captureAction = null; refreshActiveSection(true); return; }
@@ -4590,7 +5062,8 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         window.addEventListener('pointermove', onHudPointerMove);
         window.addEventListener('pointerup', onHudPointerUp);
         window.addEventListener('resize', () => { R.visual.transform = null; applyUiState(); }, { passive: true });
-        window.addEventListener('visibilitychange', () => { if (!document.hidden) { R.visual.transform = null; resizeOverlay(); refreshActiveSection(true); } });
+        window.addEventListener('visibilitychange', () => { if (document.hidden) { try { autoReleaseAll(); } catch { /* ignore */ } } else { R.visual.transform = null; resizeOverlay(); refreshActiveSection(true); } });
+        window.addEventListener('blur', () => { try { autoReleaseAll(); } catch { /* ignore */ } });
         window.addEventListener('beforeunload', persistAll);
         window.addEventListener('pagehide', persistAll);
         window.addEventListener('popstate', () => { R.visual.transform = null; logEvent('navigation', 'History navigation'); });
@@ -4613,6 +5086,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
             GM_registerMenuCommand('Open Debug Console / Diagnostics', () => { setMenuOpen(true); setSection('debug'); });
             GM_registerMenuCommand('Export Statistics', () => exportStats('json'));
             GM_registerMenuCommand('Export Configuration Backup', exportConfigBackup);
+            GM_registerMenuCommand('Toggle Custom Autoplay', toggleAutoplay);
         } catch (e) { logError('GM_registerMenuCommand', e); }
     }
 
@@ -4629,6 +5103,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         bindGlobalEvents();
         registerCommands();
         R.tickTimer = setInterval(tick, 200);
+        R.autoplay.timer = setInterval(() => { try { if (cfg.autoplay.enabled && moduleOn('customAutoplay')) autoplayTick(); } catch (e) { logError('autoplayTimer', e); } }, 2);
         R.rafId = requestAnimationFrame(frameLoop);
         void loadLibrary();
         diagnostics();
@@ -4639,6 +5114,9 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
 
     /** Remove our DOM, timers and probe state. WOSU itself is untouched. */
     function destroy() {
+        try { autoReleaseAll(); } catch { /* ignore */ }
+        if (R.autoplay.timer) clearInterval(R.autoplay.timer);
+        R.autoplay.running = false;
         try {
             const probe = (typeof unsafeWindow !== 'undefined' && unsafeWindow.__WO_PROBE__) || window.__WO_PROBE__;
             if (probe && probe.stateTimer) clearInterval(probe.stateTimer);
@@ -4665,7 +5143,7 @@ input[type=color].wo-color{width:34px;height:24px;padding:0;border:1px solid var
         get state() { return R; },
         get configs() { return configs; },
         get session() { return session; },
-        api: { parseOsu, buildPlayable, createSliderPath, buildControlPoints, difficultyAttributes, computeAnalysis, diagnostics, refresh: () => refreshActiveSection(true), exportStats, loadSelectedBeatmap, loadLibrary, onProbe, installProbe, destroy },
+        api: { parseOsu, buildPlayable, createSliderPath, buildControlPoints, difficultyAttributes, computeAnalysis, diagnostics, refresh: () => refreshActiveSection(true), exportStats, loadSelectedBeatmap, loadLibrary, onProbe, installProbe, destroy, toggleAutoplay, startAutoplayNow, applyAutoplayPreset, buildAutoplayPlan, autoplayTick, autoReleaseAll },
         utils: { fmtTime, fmtTimePrecise, clamp, mergeDeep, hashString }
     };
 
